@@ -376,6 +376,11 @@ function PlayPageClient() {
   // 弹幕加载状态管理，防止重复加载
   const danmuLoadingRef = useRef<boolean>(false);
   const lastDanmuLoadKeyRef = useRef<string>('');
+  
+  // 🚀 新增：弹幕操作防抖和性能优化
+  const danmuOperationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const episodeSwitchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const danmuPluginStateRef = useRef<any>(null); // 保存弹幕插件状态
 
   const artPlayerRef = useRef<any>(null);
   const artRef = useRef<HTMLDivElement | null>(null);
@@ -989,6 +994,20 @@ function PlayPageClient() {
 
   // 清理播放器资源的统一函数（添加更完善的清理逻辑）
   const cleanupPlayer = () => {
+    // 🚀 新增：清理弹幕优化相关的定时器
+    if (danmuOperationTimeoutRef.current) {
+      clearTimeout(danmuOperationTimeoutRef.current);
+      danmuOperationTimeoutRef.current = null;
+    }
+    
+    if (episodeSwitchTimeoutRef.current) {
+      clearTimeout(episodeSwitchTimeoutRef.current);
+      episodeSwitchTimeoutRef.current = null;
+    }
+    
+    // 清理弹幕状态引用
+    danmuPluginStateRef.current = null;
+    
     if (artPlayerRef.current) {
       try {
         // 1. 清理弹幕插件的WebWorker
@@ -1178,6 +1197,73 @@ function PlayPageClient() {
     }
   }
 
+  // 🚀 优化的弹幕操作处理函数（防抖 + 性能优化）
+  const handleDanmuOperationOptimized = (nextState: boolean) => {
+    // 清除之前的防抖定时器
+    if (danmuOperationTimeoutRef.current) {
+      clearTimeout(danmuOperationTimeoutRef.current);
+    }
+    
+    // 立即更新UI状态（确保响应性）
+    externalDanmuEnabledRef.current = nextState;
+    setExternalDanmuEnabled(nextState);
+    
+    // 同步保存到localStorage（快速操作）
+    try {
+      localStorage.setItem('enable_external_danmu', String(nextState));
+    } catch (e) {
+      console.warn('localStorage设置失败:', e);
+    }
+    
+    // 防抖处理弹幕数据操作（避免频繁切换时的性能问题）
+    danmuOperationTimeoutRef.current = setTimeout(async () => {
+      try {
+        if (artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
+          const plugin = artPlayerRef.current.plugins.artplayerPluginDanmuku;
+          
+          if (nextState) {
+            // 开启弹幕：使用更温和的加载方式
+            console.log('🚀 优化后开启外部弹幕...');
+            
+            // 使用requestIdleCallback优化性能（如果可用）
+            const loadDanmu = async () => {
+              const externalDanmu = await loadExternalDanmu();
+              // 二次确认状态，防止快速切换导致的状态不一致
+              if (externalDanmuEnabledRef.current && artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
+                plugin.load(externalDanmu);
+                plugin.show();
+                console.log('✅ 外部弹幕已优化加载:', externalDanmu.length, '条');
+                
+                if (artPlayerRef.current && externalDanmu.length > 0) {
+                  artPlayerRef.current.notice.show = `已加载 ${externalDanmu.length} 条弹幕`;
+                }
+              }
+            };
+            
+            // 使用 requestIdleCallback 或 setTimeout 来确保不阻塞主线程
+            if (typeof requestIdleCallback !== 'undefined') {
+              requestIdleCallback(loadDanmu, { timeout: 1000 });
+            } else {
+              setTimeout(loadDanmu, 50);
+            }
+          } else {
+            // 关闭弹幕：立即处理
+            console.log('🚀 优化后关闭外部弹幕...');
+            plugin.load([]);
+            plugin.hide();
+            console.log('✅ 外部弹幕已关闭');
+            
+            if (artPlayerRef.current) {
+              artPlayerRef.current.notice.show = '外部弹幕已关闭';
+            }
+          }
+        }
+      } catch (error) {
+        console.error('优化后弹幕操作失败:', error);
+      }
+    }, 300); // 300ms防抖延迟
+  };
+
   // 加载外部弹幕数据（带缓存和防重复）
   const loadExternalDanmu = async (): Promise<any[]> => {
     if (!externalDanmuEnabledRef.current) {
@@ -1296,36 +1382,74 @@ function PlayPageClient() {
     }
   };
 
-  // 当集数索引变化时自动更新视频地址
+  // 🚀 优化的集数变化处理（防抖 + 状态保护）
   useEffect(() => {
     updateVideoUrl(detail, currentEpisodeIndex);
     
     // 重置弹幕加载标识，允许新集数加载弹幕
     lastDanmuLoadKeyRef.current = '';
     
+    // 清除之前的集数切换定时器，防止重复执行
+    if (episodeSwitchTimeoutRef.current) {
+      clearTimeout(episodeSwitchTimeoutRef.current);
+    }
+    
     // 如果播放器已经存在且弹幕插件已加载，重新加载弹幕
     if (artPlayerRef.current && artPlayerRef.current.plugins?.artplayerPluginDanmuku) {
-      console.log('集数变化，重新加载弹幕');
-      setTimeout(async () => {
+      console.log('🚀 集数变化，优化后重新加载弹幕');
+      
+      // 保存当前弹幕插件状态
+      danmuPluginStateRef.current = {
+        isHide: artPlayerRef.current.plugins.artplayerPluginDanmuku.isHide,
+        isStop: artPlayerRef.current.plugins.artplayerPluginDanmuku.isStop,
+        option: artPlayerRef.current.plugins.artplayerPluginDanmuku.option
+      };
+      
+      // 使用防抖处理弹幕重新加载
+      episodeSwitchTimeoutRef.current = setTimeout(async () => {
         try {
-          const externalDanmu = await loadExternalDanmu(); // 这里会检查开关状态
-          console.log('集数变化后外部弹幕加载结果:', externalDanmu);
+          // 确保播放器和插件仍然存在（防止快速切换时的状态不一致）
+          if (!artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
+            console.warn('⚠️ 集数切换后弹幕插件不存在，跳过弹幕加载');
+            return;
+          }
           
+          const externalDanmu = await loadExternalDanmu(); // 这里会检查开关状态
+          console.log('🔄 集数变化后外部弹幕加载结果:', externalDanmu);
+          
+          // 再次确认插件状态
           if (artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
+            const plugin = artPlayerRef.current.plugins.artplayerPluginDanmuku;
+            
             if (externalDanmu.length > 0) {
-              console.log('向播放器插件重新加载弹幕数据:', externalDanmu.length, '条');
-              artPlayerRef.current.plugins.artplayerPluginDanmuku.load(externalDanmu);
-              artPlayerRef.current.notice.show = `已加载 ${externalDanmu.length} 条弹幕`;
+              console.log('✅ 向播放器插件重新加载弹幕数据:', externalDanmu.length, '条');
+              plugin.load(externalDanmu);
+              
+              // 恢复弹幕插件的状态
+              if (danmuPluginStateRef.current) {
+                if (!danmuPluginStateRef.current.isHide) {
+                  plugin.show();
+                }
+              }
+              
+              if (artPlayerRef.current) {
+                artPlayerRef.current.notice.show = `已加载 ${externalDanmu.length} 条弹幕`;
+              }
             } else {
-              console.log('集数变化后没有弹幕数据可加载');
-              // 不要自动load([])，保持当前状态
-              artPlayerRef.current.notice.show = '暂无弹幕数据';
+              console.log('📭 集数变化后没有弹幕数据可加载');
+              // 不自动清空，保持用户体验
+              if (artPlayerRef.current) {
+                artPlayerRef.current.notice.show = '暂无弹幕数据';
+              }
             }
           }
         } catch (error) {
-          console.error('集数变化后加载外部弹幕失败:', error);
+          console.error('❌ 集数变化后加载外部弹幕失败:', error);
+        } finally {
+          // 清理定时器引用
+          episodeSwitchTimeoutRef.current = null;
         }
-      }, 1000); // 延迟1秒确保视频加载完成
+      }, 800); // 缩短延迟时间，提高响应性
     }
   }, [detail, currentEpisodeIndex]);
 
@@ -2015,10 +2139,15 @@ function PlayPageClient() {
     // 优先使用ArtPlayer的switch方法，避免重建播放器
     if (artPlayerRef.current && !loading) {
       try {
-        // 清空当前弹幕（为切换做准备）
+        // 🚀 优化：不在这里处理弹幕，让 useEffect 统一处理
+        // 保存当前弹幕状态，但不清空弹幕（避免闪烁）
         if (artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
-          artPlayerRef.current.plugins.artplayerPluginDanmuku.load([]);
-          console.log('已清空弹幕数据，准备切换');
+          danmuPluginStateRef.current = {
+            isHide: artPlayerRef.current.plugins.artplayerPluginDanmuku.isHide,
+            isStop: artPlayerRef.current.plugins.artplayerPluginDanmuku.isStop,
+            option: artPlayerRef.current.plugins.artplayerPluginDanmuku.option
+          };
+          console.log('🔄 已保存弹幕状态，准备切换视频');
         }
         
         // 使用ArtPlayer的switch方法切换URL
@@ -2033,26 +2162,7 @@ function PlayPageClient() {
           );
         }
         
-        // 延迟重新加载弹幕，确保视频切换完成
-        setTimeout(async () => {
-          try {
-            const externalDanmu = await loadExternalDanmu();
-            console.log('切换后重新加载弹幕结果:', externalDanmu);
-            
-            if (artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
-              if (externalDanmu.length > 0) {
-                console.log('切换后向播放器插件加载弹幕数据:', externalDanmu.length, '条');
-                artPlayerRef.current.plugins.artplayerPluginDanmuku.load(externalDanmu);
-                artPlayerRef.current.notice.show = `已加载 ${externalDanmu.length} 条弹幕`;
-              } else {
-                console.log('切换后没有弹幕数据可加载');
-                artPlayerRef.current.notice.show = '暂无弹幕数据';
-              }
-            }
-          } catch (error) {
-            console.error('切换后重新加载外部弹幕失败:', error);
-          }
-        }, 1500);
+        // 🚀 移除原有的 setTimeout 弹幕加载逻辑，交由 useEffect 统一优化处理
         
         console.log('使用switch方法成功切换视频');
         return;
@@ -2264,58 +2374,11 @@ function PlayPageClient() {
             onSwitch: function (item: any) {
               const nextState = !item.switch;
               
-              // 立即同步更新所有状态（确保UI响应速度）
-              externalDanmuEnabledRef.current = nextState;
-              setExternalDanmuEnabled(nextState);
+              // 🚀 使用优化后的弹幕操作处理函数
+              handleDanmuOperationOptimized(nextState);
+              
+              // 更新tooltip显示
               item.tooltip = nextState ? '外部弹幕已开启' : '外部弹幕已关闭';
-              
-              // 同步localStorage操作（快速）
-              try {
-                localStorage.setItem('enable_external_danmu', String(nextState));
-              } catch (e) {
-                console.warn('localStorage设置失败:', e);
-              }
-              
-              // 异步处理弹幕数据（完全非阻塞）
-              Promise.resolve().then(async () => {
-                try {
-                  if (artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
-                    const plugin = artPlayerRef.current.plugins.artplayerPluginDanmuku;
-                    
-                    if (nextState) {
-                      // 开启外部弹幕：清空当前数据再加载新数据
-                      console.log('开启外部弹幕，清空并加载新数据...');
-                      plugin.load([]); // 先清空
-                      const externalDanmu = await loadExternalDanmu();
-                      if (externalDanmuEnabledRef.current) { // 再次检查状态，防止快速切换
-                        plugin.load(externalDanmu);
-                        plugin.show();
-                        console.log('外部弹幕已加载:', externalDanmu.length, '条');
-                        // 显示弹幕加载提示
-                        if (artPlayerRef.current) {
-                          if (externalDanmu.length > 0) {
-                            artPlayerRef.current.notice.show = `已加载 ${externalDanmu.length} 条弹幕`;
-                          } else {
-                            artPlayerRef.current.notice.show = '暂无弹幕数据';
-                          }
-                        }
-                      }
-                    } else {
-                      // 关闭外部弹幕：清空数据并隐藏
-                      console.log('关闭外部弹幕，清空数据并隐藏...');
-                      plugin.load([]); // 清空弹幕数据
-                      plugin.hide();
-                      console.log('外部弹幕已关闭并清空');
-                      // 显示关闭提示
-                      if (artPlayerRef.current) {
-                        artPlayerRef.current.notice.show = '外部弹幕已关闭';
-                      }
-                    }
-                  }
-                } catch (error) {
-                  console.error('异步处理外部弹幕失败:', error);
-                }
-              });
               
               return nextState; // 立即返回新状态
             },
@@ -2762,8 +2825,6 @@ function PlayPageClient() {
           setTimeout(() => {
             const configButton = document.querySelector('.artplayer-plugin-danmuku .apd-config');
             const configPanel = document.querySelector('.artplayer-plugin-danmuku .apd-config-panel');
-            const styleButton = document.querySelector('.artplayer-plugin-danmuku .apd-style');
-            const stylePanel = document.querySelector('.artplayer-plugin-danmuku .apd-style-panel');
             
             if (!configButton || !configPanel) {
               console.warn('弹幕配置按钮或面板未找到');
@@ -2912,236 +2973,13 @@ function PlayPageClient() {
               
               console.log('移动端弹幕配置切换功能已激活');
             } else {
-              // 🚀 桌面端：智能hover优化 - 延迟显示 + 智能隐藏
-              console.log('桌面端启用智能hover优化');
-              
-              // 定时器管理
-              let configHoverTimer: NodeJS.Timeout | null = null;
-              let configHideTimer: NodeJS.Timeout | null = null;
-              let styleHoverTimer: NodeJS.Timeout | null = null;
-              let styleHideTimer: NodeJS.Timeout | null = null;
-              
-              // 配置参数
-              const HOVER_DELAY = 300;  // hover后300ms显示，避免误触
-              const HIDE_DELAY = 150;   // 离开后150ms隐藏
-              const INTENT_DELAY = 120; // 意图明确时快速响应
-              
-              // 用户意图检测
-              const detectUserIntent = (mouseEvent: MouseEvent, element: Element) => {
-                const rect = element.getBoundingClientRect();
-                const centerX = rect.left + rect.width / 2;
-                const centerY = rect.top + rect.height / 2;
-                
-                const distance = Math.sqrt(
-                  Math.pow(mouseEvent.clientX - centerX, 2) + 
-                  Math.pow(mouseEvent.clientY - centerY, 2)
-                );
-                
-                // 距离中心越近，意图越明确
-                return distance < 30 ? 'intentional' : 'casual';
-              };
-              
-              // 弹幕配置按钮优化hover
-              const optimizeConfigHover = () => {
-                // 移除原有的CSS hover效果，使用JS控制
-                const style = document.createElement('style');
-                style.id = 'danmaku-hover-optimization';
-                style.textContent = `
-                  /* 禁用原有CSS hover，改用JS控制 */
-                  .artplayer-plugin-danmuku .apd-config:hover .apd-config-panel {
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                  }
-                  
-                  .artplayer-plugin-danmuku .apd-style:hover .apd-style-panel {
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                  }
-                  
-                  /* 优化后的显示状态 */
-                  .artplayer-plugin-danmuku .apd-config-panel.optimized-show,
-                  .artplayer-plugin-danmuku .apd-style-panel.optimized-show {
-                    opacity: 1 !important;
-                    pointer-events: auto !important;
-                    transition: opacity 0.2s ease-in-out !important;
-                  }
-                  
-                  /* 优化后的隐藏状态 */
-                  .artplayer-plugin-danmuku .apd-config-panel.optimized-hide,
-                  .artplayer-plugin-danmuku .apd-style-panel.optimized-hide {
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                    transition: opacity 0.15s ease-out !important;
-                  }
-                `;
-                document.head.appendChild(style);
-              };
-              
-              // 配置按钮hover事件
-              configButton.addEventListener('mouseenter', (e) => {
-                if (configHideTimer) clearTimeout(configHideTimer);
-                
-                const intent = detectUserIntent(e as MouseEvent, configButton);
-                const delay = intent === 'intentional' ? INTENT_DELAY : HOVER_DELAY;
-                
-                configHoverTimer = setTimeout(() => {
-                  configPanel.classList.remove('optimized-hide');
-                  configPanel.classList.add('optimized-show');
-                  console.log(`🎯 配置面板显示 (${intent}, ${delay}ms)`);
-                }, delay);
-              });
-              
-              configButton.addEventListener('mouseleave', () => {
-                if (configHoverTimer) clearTimeout(configHoverTimer);
-                
-                configHideTimer = setTimeout(() => {
-                  configPanel.classList.remove('optimized-show');
-                  configPanel.classList.add('optimized-hide');
-                  console.log('📤 配置面板隐藏');
-                }, HIDE_DELAY);
-              });
-              
-              // 面板内hover保持显示
-              configPanel.addEventListener('mouseenter', () => {
-                if (configHideTimer) clearTimeout(configHideTimer);
-                configPanel.classList.remove('optimized-hide');
-                configPanel.classList.add('optimized-show');
-              });
-              
-              configPanel.addEventListener('mouseleave', () => {
-                configHideTimer = setTimeout(() => {
-                  configPanel.classList.remove('optimized-show');
-                  configPanel.classList.add('optimized-hide');
-                  console.log('📤 配置面板隐藏 (从面板离开)');
-                }, HIDE_DELAY);
-              });
-              
-              // 样式按钮类似处理（如果存在）
-              if (styleButton && stylePanel) {
-                styleButton.addEventListener('mouseenter', (e) => {
-                  if (styleHideTimer) clearTimeout(styleHideTimer);
-                  
-                  const intent = detectUserIntent(e as MouseEvent, styleButton);
-                  const delay = intent === 'intentional' ? INTENT_DELAY : HOVER_DELAY;
-                  
-                  styleHoverTimer = setTimeout(() => {
-                    stylePanel.classList.remove('optimized-hide');
-                    stylePanel.classList.add('optimized-show');
-                    console.log(`🎨 样式面板显示 (${intent}, ${delay}ms)`);
-                  }, delay);
-                });
-                
-                styleButton.addEventListener('mouseleave', () => {
-                  if (styleHoverTimer) clearTimeout(styleHoverTimer);
-                  
-                  styleHideTimer = setTimeout(() => {
-                    stylePanel.classList.remove('optimized-show');
-                    stylePanel.classList.add('optimized-hide');
-                    console.log('📤 样式面板隐藏');
-                  }, HIDE_DELAY);
-                });
-                
-                stylePanel.addEventListener('mouseenter', () => {
-                  if (styleHideTimer) clearTimeout(styleHideTimer);
-                  stylePanel.classList.remove('optimized-hide');
-                  stylePanel.classList.add('optimized-show');
-                });
-                
-                stylePanel.addEventListener('mouseleave', () => {
-                  styleHideTimer = setTimeout(() => {
-                    stylePanel.classList.remove('optimized-show');
-                    stylePanel.classList.add('optimized-hide');
-                    console.log('📤 样式面板隐藏 (从面板离开)');
-                  }, HIDE_DELAY);
-                });
-              }
-              
-              // 应用CSS优化
-              optimizeConfigHover();
-              
-              // 🎹 键盘快捷键支持
-              const handleKeyboardShortcuts = (e: KeyboardEvent) => {
-                // D键快速切换弹幕显示/隐藏
-                if (e.key.toLowerCase() === 'd' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-                  if ((e.target as HTMLElement).tagName !== 'INPUT' && (e.target as HTMLElement).tagName !== 'TEXTAREA') {
-                    e.preventDefault();
-                    if (artPlayerRef.current?.plugins?.artplayerPluginDanmuku) {
-                      const isVisible = !artPlayerRef.current.plugins.artplayerPluginDanmuku.isHide;
-                      if (isVisible) {
-                        artPlayerRef.current.plugins.artplayerPluginDanmuku.hide();
-                      } else {
-                        artPlayerRef.current.plugins.artplayerPluginDanmuku.show();
-                      }
-                      console.log('🎹 快捷键切换弹幕:', isVisible ? '隐藏' : '显示');
-                    }
-                  }
-                }
-                
-                // ESC键隐藏弹幕面板
-                if (e.key === 'Escape') {
-                  if (configPanel.classList.contains('optimized-show')) {
-                    configPanel.classList.remove('optimized-show');
-                    configPanel.classList.add('optimized-hide');
-                  }
-                  if (stylePanel && stylePanel.classList.contains('optimized-show')) {
-                    stylePanel.classList.remove('optimized-show');
-                    stylePanel.classList.add('optimized-hide');
-                  }
-                  console.log('🎹 ESC键隐藏弹幕面板');
-                }
-              };
-              
-              document.addEventListener('keydown', handleKeyboardShortcuts);
-              
-              // 🖱️ 全局点击隐藏面板
-              const handleGlobalClick = (e: MouseEvent) => {
-                const target = e.target as Element;
-                if (!configButton.contains(target) && 
-                    !configPanel.contains(target) &&
-                    !(styleButton && styleButton.contains(target)) &&
-                    !(stylePanel && stylePanel.contains(target))) {
-                  
-                  if (configPanel.classList.contains('optimized-show')) {
-                    configPanel.classList.remove('optimized-show');
-                    configPanel.classList.add('optimized-hide');
-                    console.log('🖱️ 全局点击隐藏配置面板');
-                  }
-                  if (stylePanel && stylePanel.classList.contains('optimized-show')) {
-                    stylePanel.classList.remove('optimized-show');
-                    stylePanel.classList.add('optimized-hide');
-                    console.log('🖱️ 全局点击隐藏样式面板');
-                  }
-                }
-              };
-              
-              document.addEventListener('click', handleGlobalClick);
-              
-              // 🔄 清理函数（防止内存泄漏）
-              const cleanupDesktopOptimizations = () => {
-                document.removeEventListener('keydown', handleKeyboardShortcuts);
-                document.removeEventListener('click', handleGlobalClick);
-                if (configHoverTimer) clearTimeout(configHoverTimer);
-                if (configHideTimer) clearTimeout(configHideTimer);
-                if (styleHoverTimer) clearTimeout(styleHoverTimer);
-                if (styleHideTimer) clearTimeout(styleHideTimer);
-                
-                const styleElement = document.getElementById('danmaku-hover-optimization');
-                if (styleElement) {
-                  styleElement.remove();
-                }
-              };
-              
-              // 在播放器销毁时清理
-              if (artPlayerRef.current) {
-                artPlayerRef.current.on('destroy', cleanupDesktopOptimizations);
-              }
-              
-              console.log('✅ 桌面端智能hover优化已启用 (含键盘快捷键支持)');
+              // 桌面端：保持原有hover机制
+              console.log('桌面端保持原有hover机制');
             }
           }, 2000); // 延迟2秒确保弹幕插件完全初始化
         };
         
-        // 启用优化后的弹幕菜单交互
+        // 启用移动端弹幕配置切换
         addMobileDanmakuToggle();
 
         // 播放器就绪后，加载外部弹幕数据
