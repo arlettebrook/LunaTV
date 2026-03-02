@@ -13,6 +13,10 @@ interface VirtualGridProps<T> {
   /** Overscan rows */
   overscan?: number;
   className?: string;
+  /** Callback when user scrolls near the end - triggers before reaching last item */
+  endReached?: () => void;
+  /** How many rows before the end to trigger endReached (default: 2) */
+  endReachedThreshold?: number;
 }
 
 /**
@@ -20,6 +24,7 @@ interface VirtualGridProps<T> {
  * and virtualises *rows* via @tanstack/react-virtual.
  *
  * Uses document.body as scroll element for window-level scrolling.
+ * Based on official @tanstack/react-virtual implementation pattern.
  */
 export default function VirtualGrid<T>({
   items,
@@ -28,6 +33,8 @@ export default function VirtualGrid<T>({
   rowGapClass = 'pb-14 sm:pb-20',
   overscan = 3,
   className = '',
+  endReached,
+  endReachedThreshold = 2,
 }: VirtualGridProps<T>) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [columns, setColumns] = useState(3);
@@ -60,6 +67,33 @@ export default function VirtualGrid<T>({
 
   const virtualRows = virtualizer.getVirtualItems();
 
+  // Detect when user scrolls near the end and trigger endReached callback
+  const lastVirtualRowRef = useRef<number>(-1);
+  useEffect(() => {
+    if (!endReached || virtualRows.length === 0) return;
+
+    const lastVirtualRow = virtualRows[virtualRows.length - 1];
+    const lastRowIndex = lastVirtualRow.index;
+
+    // Calculate dynamic threshold based on viewport height and row height
+    // Mobile devices need earlier triggering due to smaller screens
+    const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 800;
+    const visibleRows = Math.ceil(viewportHeight / estimateRowHeight);
+    // Trigger when remaining rows <= visible rows + threshold
+    // This ensures data loads before user sees the end
+    const dynamicThreshold = Math.max(visibleRows + endReachedThreshold, endReachedThreshold);
+
+    // Trigger endReached when we're within dynamic threshold rows of the end
+    // and we haven't triggered for this position yet
+    if (
+      lastRowIndex >= rowCount - dynamicThreshold &&
+      lastRowIndex !== lastVirtualRowRef.current
+    ) {
+      lastVirtualRowRef.current = lastRowIndex;
+      endReached();
+    }
+  }, [virtualRows, rowCount, endReached, endReachedThreshold, estimateRowHeight]);
+
   return (
     <>
       {/* Hidden probe element to measure column count from computed CSS grid */}
@@ -79,34 +113,38 @@ export default function VirtualGrid<T>({
           position: 'relative',
         }}
       >
-        {virtualRows.map((virtualRow) => {
-          const startIdx = virtualRow.index * columns;
-          const rowItems = items.slice(startIdx, startIdx + columns);
+        {/* Container with unified offset - official pattern */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            transform: `translateY(${virtualRows[0]?.start ?? 0}px)`,
+          }}
+        >
+          {virtualRows.map((virtualRow) => {
+            const startIdx = virtualRow.index * columns;
+            const rowItems = items.slice(startIdx, startIdx + columns);
 
-          return (
-            <div
-              key={virtualRow.key}
-              data-index={virtualRow.index}
-              ref={virtualizer.measureElement}
-              className={rowGapClass}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                transform: `translateY(${virtualRow.start}px)`,
-              }}
-            >
-              <div className={`grid ${className}`}>
-                {rowItems.map((item, i) => (
-                  <React.Fragment key={startIdx + i}>
-                    {renderItem(item, startIdx + i)}
-                  </React.Fragment>
-                ))}
+            return (
+              <div
+                key={virtualRow.key}
+                data-index={virtualRow.index}
+                ref={virtualizer.measureElement}
+                className={rowGapClass}
+              >
+                <div className={`grid ${className}`}>
+                  {rowItems.map((item, i) => (
+                    <React.Fragment key={startIdx + i}>
+                      {renderItem(item, startIdx + i)}
+                    </React.Fragment>
+                  ))}
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
     </>
   );
