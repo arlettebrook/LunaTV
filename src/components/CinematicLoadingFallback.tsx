@@ -33,29 +33,19 @@ export function CinematicLoadingFallback() {
 
   // Fetch Bing wallpaper
   useEffect(() => {
-    const abortController = new AbortController();
-
     const fetchBingWallpaper = async () => {
       try {
-        const response = await fetch('/api/bing-wallpaper', {
-          signal: abortController.signal,
-        });
+        const response = await fetch('/api/bing-wallpaper');
         const data = await response.json();
-        if (data.url && isMountedRef.current) {
+        if (data.url) {
           setBingWallpaper(data.url);
         }
       } catch (error) {
-        if (isMountedRef.current && (error as Error).name !== 'AbortError') {
-          console.log('Failed to fetch Bing wallpaper:', error);
-        }
+        console.log('Failed to fetch Bing wallpaper:', error);
       }
     };
 
     fetchBingWallpaper();
-
-    return () => {
-      abortController.abort();
-    };
   }, []);
 
   // Fade in after mount
